@@ -12,7 +12,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.actor import load_model
 from src.config import load_config
 from src.dataset import load_instances_from_manifest
+from src.logging_utils import read_instance_log
 from src.pipeline import V1RateSample, run_trajectory
+
+
+def _is_already_completed(log_dir: str, instance_id: str) -> bool:
+    """True if a prior run already wrote a summary line for this instance — lets a
+    restarted run skip finished instances instead of redoing them from scratch."""
+    try:
+        _, summary = read_instance_log(log_dir, instance_id)
+    except FileNotFoundError:
+        return False
+    return summary is not None
 
 
 def report_v1_speedup(all_samples: list[V1RateSample]) -> None:
@@ -74,16 +85,34 @@ def main() -> None:
 
     all_v1_samples: list[V1RateSample] = []
     resolved_count = 0
+    completed_count = 0
+    failed_instance_ids: list[str] = []
+
     for i, instance in enumerate(instances):
-        print(f"[{i + 1}/{len(instances)}] {instance['instance_id']}")
-        summary, v1_samples = run_trajectory(
-            instance, cfg, actor_model, actor_tokenizer, speculator_model, speculator_tokenizer
-        )
+        instance_id = instance["instance_id"]
+        print(f"[{i + 1}/{len(instances)}] {instance_id}")
+
+        if _is_already_completed(cfg.logging.log_dir, instance_id):
+            print("  already completed in a prior run; skipping")
+            continue
+
+        try:
+            summary, v1_samples = run_trajectory(
+                instance, cfg, actor_model, actor_tokenizer, speculator_model, speculator_tokenizer
+            )
+        except Exception as exc:  # one instance's environment/repo issue shouldn't kill the whole batch
+            print(f"  ERROR: {type(exc).__name__}: {exc}; skipping and continuing")
+            failed_instance_ids.append(instance_id)
+            continue
+
         all_v1_samples.extend(v1_samples)
         resolved_count += int(summary.resolved)
+        completed_count += 1
         print(f"  resolved={summary.resolved} steps={summary.total_steps}")
 
-    print(f"\nResolved {resolved_count}/{len(instances)} instances (mode={cfg.mode}).")
+    print(f"\nResolved {resolved_count}/{completed_count} completed instances (mode={cfg.mode}).")
+    if failed_instance_ids:
+        print(f"{len(failed_instance_ids)} instance(s) errored and were skipped: {', '.join(failed_instance_ids)}")
 
     if cfg.mode == "v1":
         report_v1_speedup(all_v1_samples)

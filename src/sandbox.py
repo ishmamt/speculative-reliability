@@ -168,6 +168,11 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
         )
     except subprocess.TimeoutExpired:
         return "fail", "test run timed out"
+    except OSError as exc:
+        # e.g. the repo's test_cmd binary (pytest, a runner script, ...) isn't on PATH or
+        # isn't executable in this shared environment — an environment gap, not a real
+        # test failure, but still something the instance can't be verified against.
+        return "fail", f"test command could not be run: {exc}"
 
     parser = MAP_REPO_TO_PARSER[instance["repo"]]
     statuses = parser(proc.stdout + proc.stderr)
