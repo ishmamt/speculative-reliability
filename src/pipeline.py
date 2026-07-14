@@ -26,6 +26,7 @@ from src.logging_utils import (
     CandidateRecord,
     InstanceSummary,
     StepRecord,
+    clear_instance_log,
     write_step_record,
     write_summary_record,
 )
@@ -246,6 +247,8 @@ def run_trajectory(
 
     Returns (summary, v1_rate_samples); the second element is empty in v0 mode.
     """
+    clear_instance_log(cfg.logging.log_dir, instance["instance_id"])
+
     repo_path = ensure_repo_cloned(instance, cfg.sandbox.worktree_base_dir)
     trajectory_worktree = create_worktree(repo_path, instance["base_commit"], cfg.sandbox.worktree_base_dir)
     base_ref = instance["base_commit"]

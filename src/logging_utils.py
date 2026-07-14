@@ -41,6 +41,13 @@ def _step_log_path(log_dir: str, instance_id: str) -> Path:
     return Path(log_dir) / f"{instance_id}.jsonl"
 
 
+def clear_instance_log(log_dir: str, instance_id: str) -> None:
+    """Remove any existing log file for `instance_id` so a fresh trajectory run doesn't
+    append onto stale records from a previous run of the same instance."""
+    path = _step_log_path(log_dir, instance_id)
+    path.unlink(missing_ok=True)
+
+
 def write_step_record(log_dir: str, record: StepRecord) -> None:
     """Append one step record as a JSONL line to results/logs/{instance_id}.jsonl."""
     path = _step_log_path(log_dir, record.instance_id)
