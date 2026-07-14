@@ -9,14 +9,17 @@ new Docker container per candidate (spec Section 7, point 1).
 """
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Literal
 
+from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
-from swebench.harness.test_spec import get_test_directives
+from swebench.harness.test_spec.python import get_test_directives
+from swebench.harness.utils import get_modified_files
 
 from src.config import SandboxConfig
 from src.dataset import load_swebench_lite
@@ -102,19 +105,44 @@ def apply_patch(worktree_path: Path, patch: str) -> bool:
     return result.returncode == 0
 
 
+def _apply_test_patch(worktree_path: Path, instance: dict) -> bool:
+    """Reset the instance's official test files to HEAD and apply the golden `test_patch`,
+    so FAIL_TO_PASS/PASS_TO_PASS tests reflect the instance's ground truth regardless of
+    whether the candidate's own patch touched those files (mirrors the swebench harness's
+    `make_eval_script_list_py`). Return False if the test_patch itself fails to apply.
+    """
+    test_patch = instance["test_patch"]
+    test_files = get_modified_files(test_patch)
+    if test_files:
+        reset = subprocess.run(
+            ["git", "checkout", "HEAD", "--", *test_files], cwd=str(worktree_path), capture_output=True, text=True
+        )
+        if reset.returncode != 0:
+            return False
+    return apply_patch(worktree_path, test_patch)
+
+
 def run_test_subset(worktree_path: Path, instance: dict, timeout_seconds: int) -> SandboxResult:
-    """Run only the instance's FAIL_TO_PASS + PASS_TO_PASS tests via pytest; report aggregate pass/fail."""
+    """Apply the instance's golden test_patch, then run only its FAIL_TO_PASS + PASS_TO_PASS
+    tests via the repo/version-specific test command (spec Section 15: "pytest via SWE-bench
+    harness" — non-pytest repos like django/django use their own runner, so the harness's own
+    `MAP_REPO_VERSION_TO_SPECS[...]["test_cmd"]` is used rather than a hardcoded `pytest` call).
+    """
     fail_to_pass = instance["FAIL_TO_PASS"]
     pass_to_pass = instance["PASS_TO_PASS"]
     test_names = list(fail_to_pass) + list(pass_to_pass)
     if not test_names:
         return "not_applicable"
 
-    directives = get_test_directives(instance)
+    if not _apply_test_patch(worktree_path, instance):
+        return "fail"
+
+    specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
+    test_command = shlex.split(specs["test_cmd"]) + get_test_directives(instance)
+
     try:
         proc = subprocess.run(
-            ["python", "-m", "pytest", "--no-header", "-rA", "--tb=no", "-p", "no:cacheprovider"]
-            + directives,
+            test_command,
             cwd=str(worktree_path),
             capture_output=True,
             text=True,
