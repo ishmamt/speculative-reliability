@@ -16,7 +16,10 @@ SYSTEM_PROMPT = (
     "\"patch\": <unified diff or empty>}. No other text. "
     "edit_file applies \"patch\" (a unified diff against \"target\") to the working tree. "
     "submit_patch ends the trajectory for grading against the working tree's accumulated edits; "
-    "its own \"target\"/\"patch\" fields are ignored."
+    "its own \"target\"/\"patch\" fields are ignored. "
+    "Each prior step in the history below shows \"sandbox=pass\" or \"sandbox=fail\" for edit_file "
+    "actions that already ran. Do not repeat a step whose sandbox already shows pass — move on to "
+    "run_tests or submit_patch instead."
 )
 
 

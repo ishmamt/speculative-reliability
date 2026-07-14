@@ -43,20 +43,23 @@ from src.signals import branching_width, compute_confidence
 from src.speculator import resample_alternatives_v0, run_parallel_v1
 
 
-def build_state_description(instance: dict[str, Any], history: list[Action]) -> str:
+def build_state_description(instance: dict[str, Any], history: list[tuple[Action, SandboxResult]]) -> str:
     """Render the task issue + prior action history into the prompt fed to Actor/Speculator.
 
-    Simplification: this is action-history-only context (no live file/test output
-    fed back for read_file/run_tests) — the object of measurement here is the
-    reliability signal, not agent coding capability (spec Section 1).
+    Each history line includes the realized sandbox outcome for edit_file steps, so the
+    model knows whether its own prior edit already landed rather than re-deriving it blind.
+
+    Simplification: still no live file content or test output fed back — the object of
+    measurement here is the reliability signal, not agent coding capability (spec Section 1).
     """
     lines = [
         f"Repository: {instance['repo']}",
         f"Base commit: {instance['base_commit']}",
         f"Issue:\n{instance['problem_statement']}",
     ]
-    for i, action in enumerate(history):
-        lines.append(f"Step {i}: {action.tool} target={action.target!r}")
+    for i, (action, sandbox_result) in enumerate(history):
+        outcome = f" sandbox={sandbox_result}" if action.tool == "edit_file" else ""
+        lines.append(f"Step {i}: {action.tool} target={action.target!r}{outcome}")
     lines.append("Produce the next action as JSON.")
     return "\n".join(lines)
 
@@ -79,7 +82,7 @@ class V1RateSample:
 def run_step_v0(
     instance: dict[str, Any],
     step_index: int,
-    history: list[Action],
+    history: list[tuple[Action, SandboxResult]],
     base_ref: str,
     actor_model: PreTrainedModel,
     actor_tokenizer: PreTrainedTokenizerBase,
@@ -148,7 +151,7 @@ def run_step_v0(
 def run_step_v1(
     instance: dict[str, Any],
     step_index: int,
-    history: list[Action],
+    history: list[tuple[Action, SandboxResult]],
     base_ref: str,
     actor_model: PreTrainedModel,
     actor_tokenizer: PreTrainedTokenizerBase,
@@ -253,7 +256,7 @@ def run_trajectory(
     trajectory_worktree = create_worktree(repo_path, instance["base_commit"], cfg.sandbox.worktree_base_dir)
     base_ref = instance["base_commit"]
 
-    history: list[Action] = []
+    history: list[tuple[Action, SandboxResult]] = []
     resolved = False
     total_extra_sandbox_calls = 0
     total_extra_wall_clock_ms = 0.0
@@ -276,7 +279,7 @@ def run_trajectory(
             write_step_record(cfg.logging.log_dir, record)
             total_extra_sandbox_calls += extra_calls
             total_extra_wall_clock_ms += extra_ms
-            history.append(action)
+            history.append((action, record.candidates[0].sandbox_result))
 
             if action.tool == "edit_file":
                 try:
