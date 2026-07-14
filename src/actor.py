@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
@@ -50,11 +51,31 @@ def _build_prompt(tokenizer: PreTrainedTokenizerBase, state_description: str) ->
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
+_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?```", re.DOTALL)
+
+
+def _extract_json_text(raw_text: str) -> str:
+    """Pull the JSON object out of the model's raw output, tolerating a markdown code fence
+    (` ```json ... ``` `) or stray prose around the object — instruct models routinely add
+    these even when told to emit bare JSON.
+    """
+    text = raw_text.strip()
+    fence_match = _CODE_FENCE_RE.search(text)
+    if fence_match:
+        return fence_match.group(1).strip()
+    brace_start, brace_end = text.find("{"), text.rfind("}")
+    if brace_start != -1 and brace_end > brace_start:
+        return text[brace_start : brace_end + 1]
+    return text
+
+
 def parse_action(raw_text: str) -> Action:
     """Parse the model's JSON action string into a structured Action; malformed output becomes tool='invalid'."""
     tool, target, patch = "invalid", "", ""
     try:
-        obj = json.loads(raw_text.strip())
+        # strict=False: models routinely emit literal newlines inside the "patch" string
+        # (mixed with properly-escaped \n) instead of consistently escaping control chars.
+        obj = json.loads(_extract_json_text(raw_text), strict=False)
         candidate_tool = obj.get("tool", "")
         if candidate_tool in ACTION_SPACE:
             tool = candidate_tool
