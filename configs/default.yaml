@@ -32,3 +32,4 @@ calibration:
 
 pipeline:
   max_steps: 30  # safety cap on trajectory length; real trajectories end at submit_patch
+  max_observation_chars: 2000  # truncation limit for read_file content fed back into the prompt

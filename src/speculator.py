@@ -12,7 +12,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from src.actor import Action, GeneratedAction, generate_action
 from src.config import Config
-from src.sandbox import SandboxResult, verify_patch
+from src.sandbox import SandboxResult, verify_patch_detailed
 from src.signals import branching_width, compute_confidence
 
 
@@ -54,6 +54,7 @@ class V1StepResult:
     actor_wall_s: float
     speculator_candidates: list[GeneratedAction]
     speculator_sandbox_results: list[SandboxResult]
+    speculator_sandbox_details: list[str]
     speculator_wall_s: float
     match: bool  # top Speculator candidate matches the realized Actor action
 
@@ -93,15 +94,15 @@ def run_parallel_v1(
         speculator_candidates = [spec_top] + extra_candidates
 
         sandbox_futures = [
-            pool.submit(verify_patch, instance_id, sc.action.patch, cfg.sandbox, base_ref)
+            pool.submit(verify_patch_detailed, instance_id, sc.action.patch, cfg.sandbox, base_ref)
             if sc.action.tool == "edit_file" else None
             for sc in speculator_candidates
         ]
 
         actor_result, actor_wall_s = actor_future.result()
-        speculator_sandbox_results = [
-            f.result() if f is not None else "not_applicable" for f in sandbox_futures
-        ]
+        sandbox_outcomes = [f.result() if f is not None else ("not_applicable", "") for f in sandbox_futures]
+        speculator_sandbox_results = [status for status, _ in sandbox_outcomes]
+        speculator_sandbox_details = [detail for _, detail in sandbox_outcomes]
 
     match = actions_match(actor_result.action, speculator_candidates[0].action)
 
@@ -110,6 +111,7 @@ def run_parallel_v1(
         actor_wall_s=actor_wall_s,
         speculator_candidates=speculator_candidates,
         speculator_sandbox_results=speculator_sandbox_results,
+        speculator_sandbox_details=speculator_sandbox_details,
         speculator_wall_s=spec_wall_s,
         match=match,
     )

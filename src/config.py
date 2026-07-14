@@ -55,6 +55,7 @@ class CalibrationConfig:
 @dataclasses.dataclass
 class PipelineConfig:
     max_steps: int
+    max_observation_chars: int
 
 
 @dataclasses.dataclass

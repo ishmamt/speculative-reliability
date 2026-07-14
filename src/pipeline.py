@@ -10,11 +10,17 @@ that state and discarded, never committed, so the gate stays observational-only
 FAIL_TO_PASS + PASS_TO_PASS subset run against the worktree's accumulated edits —
 SWE-bench's resolved criterion *is* exactly that, so no separate full-suite eval
 path is needed (spec Section 3).
+
+Each history entry the Actor sees also carries a real observation (sandbox detail
+for edit_file, actual file content for read_file, real test status for run_tests)
+read from the trajectory's own worktree — without this, a blind, single-shot agent
+has no way to tell it already succeeded/failed and tends to loop or stall.
 """
 from __future__ import annotations
 
 import dataclasses
 import time
+from pathlib import Path
 from typing import Any
 
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
@@ -37,35 +43,63 @@ from src.sandbox import (
     ensure_repo_cloned,
     remove_worktree,
     run_test_subset,
+    run_test_subset_detailed,
     verify_patch,
+    verify_patch_detailed,
 )
 from src.signals import branching_width, compute_confidence
 from src.speculator import resample_alternatives_v0, run_parallel_v1
 
+_INVALID_OBSERVATION = "your previous response could not be parsed as valid JSON; respond with a single bare JSON object matching the required schema"
 
-def build_state_description(instance: dict[str, Any], history: list[tuple[Action, SandboxResult]]) -> str:
+
+def build_state_description(instance: dict[str, Any], history: list[tuple[Action, str]]) -> str:
     """Render the task issue + prior action history into the prompt fed to Actor/Speculator.
 
-    Each history line includes the realized sandbox outcome for edit_file steps, so the
-    model knows whether its own prior edit already landed rather than re-deriving it blind.
-
-    Simplification: still no live file content or test output fed back — the object of
-    measurement here is the reliability signal, not agent coding capability (spec Section 1).
+    Each history line carries a real observation of what actually happened (sandbox
+    detail, file content, or test status) — see module docstring.
     """
     lines = [
         f"Repository: {instance['repo']}",
         f"Base commit: {instance['base_commit']}",
         f"Issue:\n{instance['problem_statement']}",
     ]
-    for i, (action, sandbox_result) in enumerate(history):
-        outcome = f" sandbox={sandbox_result}" if action.tool == "edit_file" else ""
-        lines.append(f"Step {i}: {action.tool} target={action.target!r}{outcome}")
+    for i, (action, observation) in enumerate(history):
+        line = f"Step {i}: {action.tool} target={action.target!r}"
+        if observation:
+            line += f"\n  observation: {observation}"
+        lines.append(line)
     lines.append("Produce the next action as JSON.")
     return "\n".join(lines)
 
 
 def _action_dict(action: Action) -> dict[str, str]:
     return {"tool": action.tool, "target": action.target, "patch": action.patch}
+
+
+def _read_file_observation(worktree_path: Path, target: str, max_chars: int) -> str:
+    """Read `target`'s current content from the trajectory worktree, truncated to `max_chars`."""
+    if not target:
+        return "(no target given)"
+    file_path = worktree_path / target
+    if not file_path.is_file():
+        return f"(file not found: {target})"
+    try:
+        content = file_path.read_text(errors="replace")
+    except OSError as exc:
+        return f"(could not read file: {exc})"
+    if len(content) > max_chars:
+        remaining = len(content) - max_chars
+        content = content[:max_chars] + f"\n... (truncated, {remaining} more chars)"
+    return content
+
+
+def _edit_observation(sandbox_result: SandboxResult, detail: str) -> str:
+    if sandbox_result == "pass":
+        return "sandbox=pass"
+    if sandbox_result == "fail":
+        return f"sandbox=fail; {detail}" if detail else "sandbox=fail"
+    return "sandbox=not_applicable (empty or unparsed patch)"
 
 
 @dataclasses.dataclass
@@ -82,13 +116,18 @@ class V1RateSample:
 def run_step_v0(
     instance: dict[str, Any],
     step_index: int,
-    history: list[tuple[Action, SandboxResult]],
+    history: list[tuple[Action, str]],
     base_ref: str,
     actor_model: PreTrainedModel,
     actor_tokenizer: PreTrainedTokenizerBase,
     cfg: Config,
-) -> tuple[Action, StepRecord, int, float]:
-    """Run one v0 (sequential) step. Returns (realized_action, record, extra_sandbox_calls, extra_wall_clock_ms)."""
+) -> tuple[Action, StepRecord, int, float, str]:
+    """Run one v0 (sequential) step.
+
+    Returns (realized_action, record, extra_sandbox_calls, extra_wall_clock_ms, edit_detail)
+    — `edit_detail` is the sandbox failure detail for an edit_file real action (empty
+    otherwise), used by the caller to build the next step's observation.
+    """
     state_description = build_state_description(instance, history)
     step_start = time.monotonic()
 
@@ -101,8 +140,9 @@ def run_step_v0(
     extra_gen_s = time.monotonic() - extra_start
 
     actor_sandbox_result: SandboxResult = "not_applicable"
+    edit_detail = ""
     if real.action.tool == "edit_file":
-        actor_sandbox_result = verify_patch(instance["instance_id"], real.action.patch, cfg.sandbox, base_ref)
+        actor_sandbox_result, edit_detail = verify_patch_detailed(instance["instance_id"], real.action.patch, cfg.sandbox, base_ref)
 
     extra_sandbox_start = time.monotonic()
     candidate_records = [
@@ -145,24 +185,26 @@ def run_step_v0(
         wall_clock_ms=wall_clock_ms,
         extra_model_calls=len(alternatives),
     )
-    return real.action, record, extra_sandbox_calls, extra_wall_clock_ms
+    return real.action, record, extra_sandbox_calls, extra_wall_clock_ms, edit_detail
 
 
 def run_step_v1(
     instance: dict[str, Any],
     step_index: int,
-    history: list[tuple[Action, SandboxResult]],
+    history: list[tuple[Action, str]],
     base_ref: str,
     actor_model: PreTrainedModel,
     actor_tokenizer: PreTrainedTokenizerBase,
     speculator_model: PreTrainedModel,
     speculator_tokenizer: PreTrainedTokenizerBase,
     cfg: Config,
-) -> tuple[Action, StepRecord, int, float, V1RateSample]:
+) -> tuple[Action, StepRecord, int, float, V1RateSample, str]:
     """Run one v1 (parallel) step.
 
-    Returns (realized_action, record, extra_sandbox_calls, extra_wall_clock_ms, rate_sample)
-    — `rate_sample` feeds the p/alpha/beta aggregates for the Section 6.7 speedup formula.
+    Returns (realized_action, record, extra_sandbox_calls, extra_wall_clock_ms, rate_sample,
+    edit_detail). `edit_detail` is populated on both paths: on a Speculator cache hit it comes
+    from the Speculator candidate's own (already-computed) detailed verification, so reusing
+    it costs no extra sandbox call; on a mismatch the real action gets its own verification call.
     """
     state_description = build_state_description(instance, history)
     step_start = time.monotonic()
@@ -182,15 +224,19 @@ def run_step_v1(
     baseline_needs_sandbox = result.actor_result.action.tool == "edit_file"
 
     extra_sandbox_calls = sum(1 for sc in result.speculator_candidates if sc.action.tool == "edit_file")
+    edit_detail = ""
 
     if result.match:
         actor_sandbox_result = result.speculator_sandbox_results[0]
+        edit_detail = result.speculator_sandbox_details[0]
         if baseline_needs_sandbox:
             extra_sandbox_calls -= 1  # the matched speculator call substitutes for, not adds to, baseline's call
     else:
         actor_sandbox_result = "not_applicable"
         if baseline_needs_sandbox:
-            actor_sandbox_result = verify_patch(instance["instance_id"], result.actor_result.action.patch, cfg.sandbox, base_ref)
+            actor_sandbox_result, edit_detail = verify_patch_detailed(
+                instance["instance_id"], result.actor_result.action.patch, cfg.sandbox, base_ref
+            )
 
     candidate_records = [
         CandidateRecord(
@@ -235,6 +281,7 @@ def run_step_v1(
         max(extra_sandbox_calls, 0),
         extra_wall_clock_ms,
         rate_sample,
+        edit_detail,
     )
 
 
@@ -256,7 +303,7 @@ def run_trajectory(
     trajectory_worktree = create_worktree(repo_path, instance["base_commit"], cfg.sandbox.worktree_base_dir)
     base_ref = instance["base_commit"]
 
-    history: list[tuple[Action, SandboxResult]] = []
+    history: list[tuple[Action, str]] = []
     resolved = False
     total_extra_sandbox_calls = 0
     total_extra_wall_clock_ms = 0.0
@@ -265,12 +312,12 @@ def run_trajectory(
     try:
         for step_index in range(cfg.pipeline.max_steps):
             if cfg.mode == "v0":
-                action, record, extra_calls, extra_ms = run_step_v0(
+                action, record, extra_calls, extra_ms, edit_detail = run_step_v0(
                     instance, step_index, history, base_ref, actor_model, actor_tokenizer, cfg
                 )
             else:
                 assert speculator_model is not None and speculator_tokenizer is not None
-                action, record, extra_calls, extra_ms, rate_sample = run_step_v1(
+                action, record, extra_calls, extra_ms, rate_sample, edit_detail = run_step_v1(
                     instance, step_index, history, base_ref,
                     actor_model, actor_tokenizer, speculator_model, speculator_tokenizer, cfg,
                 )
@@ -279,7 +326,19 @@ def run_trajectory(
             write_step_record(cfg.logging.log_dir, record)
             total_extra_sandbox_calls += extra_calls
             total_extra_wall_clock_ms += extra_ms
-            history.append((action, record.candidates[0].sandbox_result))
+
+            if action.tool == "edit_file":
+                observation = _edit_observation(record.candidates[0].sandbox_result, edit_detail)
+            elif action.tool == "read_file":
+                observation = _read_file_observation(trajectory_worktree, action.target, cfg.pipeline.max_observation_chars)
+            elif action.tool == "run_tests":
+                test_status, test_detail = run_test_subset_detailed(trajectory_worktree, instance, cfg.sandbox.test_timeout_seconds)
+                observation = f"tests={test_status}" + (f"; {test_detail}" if test_detail else "")
+            elif action.tool == "invalid":
+                observation = _INVALID_OBSERVATION
+            else:
+                observation = ""
+            history.append((action, observation))
 
             if action.tool == "edit_file":
                 try:

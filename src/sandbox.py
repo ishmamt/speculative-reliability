@@ -122,20 +122,38 @@ def _apply_test_patch(worktree_path: Path, instance: dict) -> bool:
     return apply_patch(worktree_path, test_patch)
 
 
-def run_test_subset(worktree_path: Path, instance: dict, timeout_seconds: int) -> SandboxResult:
+def _summarize_test_statuses(instance: dict, statuses: dict[str, str]) -> str:
+    """Short human-readable summary of which FAIL_TO_PASS/PASS_TO_PASS tests are still
+    failing or regressed, for feeding back to the Actor as an observation (not logged —
+    the logged `sandbox_result` field stays the bare pass/fail/not_applicable literal
+    per spec Section 9)."""
+    still_failing = [t for t in instance["FAIL_TO_PASS"] if statuses.get(t) != "PASSED"]
+    regressed = [t for t in instance["PASS_TO_PASS"] if statuses.get(t) != "PASSED"]
+    parts = []
+    if still_failing:
+        parts.append(f"still failing: {', '.join(still_failing[:5])}")
+    if regressed:
+        parts.append(f"regressed (previously passing): {', '.join(regressed[:5])}")
+    return "; ".join(parts)
+
+
+def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_seconds: int) -> tuple[SandboxResult, str]:
     """Apply the instance's golden test_patch, then run only its FAIL_TO_PASS + PASS_TO_PASS
     tests via the repo/version-specific test command (spec Section 15: "pytest via SWE-bench
     harness" — non-pytest repos like django/django use their own runner, so the harness's own
     `MAP_REPO_VERSION_TO_SPECS[...]["test_cmd"]` is used rather than a hardcoded `pytest` call).
+
+    Returns (status, detail) — `detail` names which tests are still failing/regressed, for
+    observation-building; the logged JSONL schema only ever stores `status`.
     """
     fail_to_pass = instance["FAIL_TO_PASS"]
     pass_to_pass = instance["PASS_TO_PASS"]
     test_names = list(fail_to_pass) + list(pass_to_pass)
     if not test_names:
-        return "not_applicable"
+        return "not_applicable", ""
 
     if not _apply_test_patch(worktree_path, instance):
-        return "fail"
+        return "fail", "golden test_patch failed to apply"
 
     specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
     test_command = shlex.split(specs["test_cmd"]) + get_test_directives(instance)
@@ -149,15 +167,22 @@ def run_test_subset(worktree_path: Path, instance: dict, timeout_seconds: int) -
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired:
-        return "fail"
+        return "fail", "test run timed out"
 
     parser = MAP_REPO_TO_PARSER[instance["repo"]]
     statuses = parser(proc.stdout + proc.stderr)
 
     for test_name in test_names:
         if statuses.get(test_name) != "PASSED":
-            return "fail"
-    return "pass"
+            return "fail", _summarize_test_statuses(instance, statuses)
+    return "pass", ""
+
+
+def run_test_subset(worktree_path: Path, instance: dict, timeout_seconds: int) -> SandboxResult:
+    """Bare pass/fail/not_applicable variant of `run_test_subset_detailed`, for callers
+    (e.g. candidate/alternative verification) that don't need the failure detail text."""
+    status, _ = run_test_subset_detailed(worktree_path, instance, timeout_seconds)
+    return status
 
 
 def remove_worktree(repo_path: Path, worktree_path: Path) -> None:
@@ -172,6 +197,27 @@ def remove_worktree(repo_path: Path, worktree_path: Path) -> None:
     subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), check=False)
 
 
+def verify_patch_detailed(
+    instance_id: str, patch: str, sandbox_cfg: SandboxConfig, base_ref: str | None = None
+) -> tuple[SandboxResult, str]:
+    """`verify_patch` plus a failure-detail string, for the one real action per step that
+    gets fed back to the Actor as an observation (spec's logged schema only ever stores
+    the bare status; see `run_test_subset_detailed`).
+    """
+    if not patch.strip():
+        return "not_applicable", ""
+
+    instance = _get_instance(instance_id)
+    repo_path = ensure_repo_cloned(instance, sandbox_cfg.worktree_base_dir)
+    worktree_path = create_worktree(repo_path, base_ref or instance["base_commit"], sandbox_cfg.worktree_base_dir)
+    try:
+        if not apply_patch(worktree_path, patch):
+            return "fail", "patch failed to apply"
+        return run_test_subset_detailed(worktree_path, instance, sandbox_cfg.test_timeout_seconds)
+    finally:
+        remove_worktree(repo_path, worktree_path)
+
+
 def verify_patch(instance_id: str, patch: str, sandbox_cfg: SandboxConfig, base_ref: str | None = None) -> SandboxResult:
     """End-to-end sandbox verification of a raw patch string against an instance ID.
 
@@ -183,15 +229,5 @@ def verify_patch(instance_id: str, patch: str, sandbox_cfg: SandboxConfig, base_
     a trajectory's current worktree head to verify a candidate against accumulated
     prior edits instead of a fresh checkout.
     """
-    if not patch.strip():
-        return "not_applicable"
-
-    instance = _get_instance(instance_id)
-    repo_path = ensure_repo_cloned(instance, sandbox_cfg.worktree_base_dir)
-    worktree_path = create_worktree(repo_path, base_ref or instance["base_commit"], sandbox_cfg.worktree_base_dir)
-    try:
-        if not apply_patch(worktree_path, patch):
-            return "fail"
-        return run_test_subset(worktree_path, instance, sandbox_cfg.test_timeout_seconds)
-    finally:
-        remove_worktree(repo_path, worktree_path)
+    status, _ = verify_patch_detailed(instance_id, patch, sandbox_cfg, base_ref)
+    return status
