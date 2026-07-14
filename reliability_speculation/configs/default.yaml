@@ -1,0 +1,34 @@
+mode: v0  # v0 | v1
+
+dataset:
+  name: swebench_lite
+  subset_size: 50
+  seed: 42
+  manifest_path: data/instance_manifest.json
+
+models:
+  actor: Qwen/Qwen2.5-Coder-7B-Instruct
+  speculator: Qwen/Qwen2.5-Coder-1.5B-Instruct  # v1 only
+
+signal:
+  confidence_threshold: null  # set via calibration script before first full run
+  k_default: 1
+  k_uncertain: 3
+  alt_temperature: 0.8
+
+sandbox:
+  test_timeout_seconds: 120
+  worktree_base_dir: /tmp/sbx_worktrees
+
+logging:
+  log_dir: results/logs
+  log_level: INFO
+
+output:
+  results_dir: results/reports
+
+calibration:
+  num_instances: 5
+
+pipeline:
+  max_steps: 30  # safety cap on trajectory length; real trajectories end at submit_patch

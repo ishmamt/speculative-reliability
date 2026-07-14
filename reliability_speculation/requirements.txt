@@ -1,0 +1,10 @@
+torch>=2.1
+transformers>=4.44
+accelerate>=0.33
+swebench>=2.1
+datasets>=2.19
+PyYAML>=6.0
+numpy>=1.26
+scikit-learn>=1.4
+tqdm>=4.66
+GitPython>=3.1

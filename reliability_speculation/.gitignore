@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/instance_manifest.json
+results/logs/*.jsonl
+results/reports/*.md
+!results/logs/.gitkeep
+!results/reports/.gitkeep
