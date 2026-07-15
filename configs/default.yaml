@@ -5,6 +5,10 @@ dataset:
   subset_size: 50
   seed: 42
   manifest_path: data/instance_manifest.json
+  exclude_repos:  # compiled C-extension repos our git-worktree sandbox can't build; see README Limitations
+    - matplotlib/matplotlib
+    - scikit-learn/scikit-learn
+    - astropy/astropy
 
 models:
   actor: Qwen/Qwen2.5-Coder-7B-Instruct

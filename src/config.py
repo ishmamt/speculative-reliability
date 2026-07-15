@@ -14,6 +14,7 @@ class DatasetConfig:
     subset_size: int
     seed: int
     manifest_path: str
+    exclude_repos: list[str]
 
 
 @dataclasses.dataclass

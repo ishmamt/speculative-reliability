@@ -40,6 +40,15 @@ def load_swebench_lite() -> list[dict[str, Any]]:
     return [_normalize_instance(dict(inst)) for inst in ds]
 
 
+def filter_excluded_repos(instances: list[dict[str, Any]], exclude_repos: list[str]) -> list[dict[str, Any]]:
+    """Drop instances from repos this project's git-worktree-based sandbox can't verify
+    correctly — namely compiled C-extension repos (matplotlib, scikit-learn, astropy): their
+    tests need a real build step this lightweight, non-Docker sandbox doesn't perform (spec
+    Section 7; see README Limitations)."""
+    excluded = set(exclude_repos)
+    return [inst for inst in instances if inst["repo"] not in excluded]
+
+
 def select_subset(instances: list[dict[str, Any]], cfg: DatasetConfig) -> list[dict[str, Any]]:
     """Deterministically sample `cfg.subset_size` instances using `cfg.seed`."""
     rng = random.Random(cfg.seed)

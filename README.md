@@ -40,6 +40,7 @@ is hardcoded in source. See `configs/default.yaml`.
 | `dataset.subset_size` | int | `50` | Number of instances to sample |
 | `dataset.seed` | int | `42` | RNG seed for subset sampling |
 | `dataset.manifest_path` | str | `data/instance_manifest.json` | Where selected instance IDs are persisted |
+| `dataset.exclude_repos` | list[str] | `[matplotlib/matplotlib, scikit-learn/scikit-learn, astropy/astropy]` | Repos dropped before sampling — these need compiled C extensions this sandbox can't build (see Limitations) |
 | `models.actor` | str | `Qwen/Qwen2.5-Coder-7B-Instruct` | Actor HF model name |
 | `models.speculator` | str | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | Speculator HF model name (v1 only) |
 | `signal.confidence_threshold` | float \| null | `null` | Mean-logprob gate threshold; set via `calibrate_threshold.py` before a full run |
@@ -117,6 +118,14 @@ wall-clock ms, summed over the subset.
 - Single signal type: only token log-prob confidence is used. No other
   uncertainty signal (ensembling, self-consistency, etc.) is explored.
 - Depth-1 speculation only: no multi-step speculation trees are built.
+- No per-instance environment provisioning: sandbox verification runs against a
+  shared Python environment with a best-effort, once-per-`(repo, version)`
+  dependency install (`sandbox.py::_install_repo_dependencies`), not the
+  official harness's per-instance conda/Docker environments. This works for
+  pure-Python repos (confirmed against Django's golden patches) but not repos
+  needing compiled C extensions (matplotlib, scikit-learn, astropy), which are
+  excluded from sampling via `dataset.exclude_repos` rather than silently
+  producing unreliable `fail` results.
 
 ## v0 -> v1 delta
 
