@@ -26,6 +26,7 @@ from src.config import load_config
 from src.dataset import load_instances_from_manifest
 from src.sandbox import (
     _apply_test_patch,
+    _normalize_parser_keys,
     apply_patch,
     create_worktree,
     ensure_repo_cloned,
@@ -75,8 +76,8 @@ def main() -> None:
         print(proc.stderr[-3000:])
 
         parser_fn = MAP_REPO_TO_PARSER[instance["repo"]]
-        statuses = parser_fn(proc.stdout + proc.stderr, make_test_spec(instance))
-        print(f"\n--- parser found {len(statuses)} test statuses ---")
+        statuses = _normalize_parser_keys(parser_fn(proc.stdout + proc.stderr, make_test_spec(instance)))
+        print(f"\n--- parser found {len(statuses)} test statuses (normalized) ---")
         for key, value in sorted(statuses.items()):
             print(f"  {key!r}: {value}")
         print("\n--- FAIL_TO_PASS names we look up (must match a key above exactly) ---")

@@ -10,6 +10,7 @@ new Docker container per candidate (spec Section 7, point 1).
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -170,6 +171,29 @@ def _apply_test_patch(worktree_path: Path, instance: dict) -> bool:
     return apply_patch(worktree_path, test_patch)
 
 
+_DUPLICATED_METHOD_KEY_RE = re.compile(r"^(?P<method>\S+) \((?P<path>.+)\)$")
+
+
+def _normalize_parser_keys(statuses: dict[str, str]) -> dict[str, str]:
+    """This swebench version's Django parser emits keys like
+    'test_str (auth_tests.test_models.GroupTests.test_str)' — the method name duplicated at
+    the end of the parenthetical — instead of the canonical SWE-bench FAIL_TO_PASS/PASS_TO_PASS
+    form 'test_str (auth_tests.test_models.GroupTests)'. Strip the duplication so lookups
+    against the canonical names succeed; keys that don't fit the pattern (e.g. docstring-only
+    identifiers) pass through unchanged.
+    """
+    normalized: dict[str, str] = {}
+    for key, value in statuses.items():
+        match = _DUPLICATED_METHOD_KEY_RE.match(key)
+        if match:
+            method, path = match.group("method"), match.group("path")
+            suffix = f".{method}"
+            if path.endswith(suffix):
+                key = f"{method} ({path[: -len(suffix)]})"
+        normalized[key] = value
+    return normalized
+
+
 def _summarize_test_statuses(instance: dict, statuses: dict[str, str]) -> str:
     """Short human-readable summary of which FAIL_TO_PASS/PASS_TO_PASS tests are still
     failing or regressed, for feeding back to the Actor as an observation (not logged —
@@ -233,7 +257,7 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
     # This swebench version's parser functions all take (log, test_spec) even though the
     # test_spec argument goes unused in their bodies (confirmed for parse_log_django) — it's
     # a signature-compatibility requirement, not a semantic dependency on TestSpec's contents.
-    statuses = parser(proc.stdout + proc.stderr, make_test_spec(instance))
+    statuses = _normalize_parser_keys(parser(proc.stdout + proc.stderr, make_test_spec(instance)))
 
     for test_name in test_names:
         if statuses.get(test_name) != "PASSED":
