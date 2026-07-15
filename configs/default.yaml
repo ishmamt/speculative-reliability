@@ -15,7 +15,7 @@ models:
   speculator: Qwen/Qwen2.5-Coder-1.5B-Instruct  # v1 only
 
 signal:
-  confidence_threshold: -0.2330  # set via calibration script before first full run
+  confidence_threshold: -0.2199  # set via calibration script before first full run
   k_default: 1
   k_uncertain: 3
   alt_temperature: 0.8
