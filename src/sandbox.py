@@ -29,6 +29,7 @@ from src.dataset import load_swebench_lite
 SandboxResult = Literal["pass", "fail", "not_applicable"]
 
 _INSTANCE_CACHE: dict[str, dict] | None = None
+_INSTALLED_REPO_VERSIONS: set[tuple[str, str]] = set()
 
 
 def _get_instance(instance_id: str) -> dict:
@@ -45,7 +46,11 @@ def _repo_cache_dir(worktree_base_dir: str) -> Path:
 
 
 def ensure_repo_cloned(instance: dict, worktree_base_dir: str) -> Path:
-    """Clone the instance's repo into the cache dir if not already present; return its path."""
+    """Clone the instance's repo into the cache dir if not already present; return its path.
+
+    Also ensures the repo's own runtime dependencies are installed at least once for this
+    (repo, version) pair — see `_install_repo_dependencies` for why this is necessary.
+    """
     repo = instance["repo"]
     repo_path = _repo_cache_dir(worktree_base_dir) / repo.replace("/", "__")
     if not repo_path.exists():
@@ -54,7 +59,48 @@ def ensure_repo_cloned(instance: dict, worktree_base_dir: str) -> Path:
             ["git", "clone", f"https://github.com/{repo}.git", str(repo_path)],
             check=True,
         )
+
+    version_key = (repo, str(instance.get("version", "")))
+    if version_key not in _INSTALLED_REPO_VERSIONS:
+        _install_repo_dependencies(instance, repo_path, worktree_base_dir)
+        _INSTALLED_REPO_VERSIONS.add(version_key)
+
     return repo_path
+
+
+def _install_repo_dependencies(instance: dict, repo_path: Path, worktree_base_dir: str) -> None:
+    """Best-effort, once-per-(repo, version) install of the repo's own runtime dependencies
+    (e.g. Django needs `asgiref`, `sqlparse` just to be importable) into the shared Python
+    environment, at this instance's own base_commit so version-appropriate deps get pulled.
+
+    This does NOT attempt to reproduce SWE-bench's exact per-instance pinned environment —
+    that needs per-instance conda envs, which this git-worktree-based design intentionally
+    skips (spec Section 7). It's a best-effort approximation using the repo's own setup
+    metadata. A plain (non-editable) install is used deliberately: the throwaway worktree
+    this installs from is removed immediately after, and `run_test_subset_detailed` already
+    puts each test run's own worktree on PYTHONPATH ahead of site-packages — so the only
+    thing this install needs to durably provide is third-party dependencies, not the
+    package's own code. Failures are logged, not raised: some repos (e.g. matplotlib's C
+    extensions) may still not fully install this way, and that's a known limitation.
+    """
+    install_worktree = create_worktree(repo_path, instance["base_commit"], worktree_base_dir)
+    try:
+        result = subprocess.run(
+            ["pip", "install", str(install_worktree)],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            print(
+                f"warning: dependency install for {instance['repo']}@{instance.get('version')} "
+                f"failed; sandbox test runs for this repo/version may fail as a result:\n"
+                f"{result.stderr[-1000:]}"
+            )
+    except subprocess.TimeoutExpired:
+        print(f"warning: dependency install for {instance['repo']}@{instance.get('version')} timed out")
+    finally:
+        remove_worktree(repo_path, install_worktree)
 
 
 def create_worktree(repo_path: Path, commit_ish: str, worktree_base_dir: str) -> Path:
