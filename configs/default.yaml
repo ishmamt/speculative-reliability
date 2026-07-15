@@ -11,7 +11,7 @@ models:
   speculator: Qwen/Qwen2.5-Coder-1.5B-Instruct  # v1 only
 
 signal:
-  confidence_threshold: null  # set via calibration script before first full run
+  confidence_threshold: -0.2330  # set via calibration script before first full run
   k_default: 1
   k_uncertain: 3
   alt_temperature: 0.8
@@ -28,7 +28,7 @@ output:
   results_dir: results/reports
 
 calibration:
-  num_instances: 5
+  num_instances: 20
 
 pipeline:
   max_steps: 30  # safety cap on trajectory length; real trajectories end at submit_patch
