@@ -29,6 +29,25 @@ from src.dataset import load_swebench_lite
 
 SandboxResult = Literal["pass", "fail", "not_applicable"]
 
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def split_test_command(test_cmd: str) -> tuple[list[str], dict[str, str]]:
+    """shlex-split a `specs["test_cmd"]` string, peeling off any leading shell-style
+    `VAR=value` environment-variable prefixes (e.g. sympy's test_cmd is
+    'PYTHONWARNINGS=ignore::UserWarning,ignore::SyntaxWarning bin/test -C --verbose') into a
+    separate env dict. These prefixes are valid shell syntax the official harness runs
+    through bash, but we invoke the command directly via subprocess (no shell), where the
+    first token would otherwise be treated as the program name itself.
+    """
+    tokens = shlex.split(test_cmd)
+    env_overrides: dict[str, str] = {}
+    while tokens and _ENV_ASSIGNMENT_RE.match(tokens[0]):
+        key, _, value = tokens[0].partition("=")
+        env_overrides[key] = value
+        tokens = tokens[1:]
+    return tokens, env_overrides
+
 _INSTANCE_CACHE: dict[str, dict] | None = None
 _INSTALLED_REPO_VERSIONS: dict[tuple[str, str], Path] = {}
 
@@ -277,7 +296,8 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
         return "fail", "golden test_patch failed to apply"
 
     specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
-    test_command = shlex.split(specs["test_cmd"]) + get_test_directives(instance)
+    test_tokens, cmd_env_overrides = split_test_command(specs["test_cmd"])
+    test_command = test_tokens + get_test_directives(instance)
 
     # Put the checked-out worktree on PYTHONPATH so `import <package>` resolves to the local,
     # patched checkout rather than failing outright or silently picking up an unrelated globally
@@ -291,7 +311,8 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
     if deps_dir is not None:
         pythonpath_entries.append(str(deps_dir))
     pythonpath_entries.append(os.environ.get("PYTHONPATH", ""))
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in pythonpath_entries if p)}
+    env = {**os.environ, **cmd_env_overrides}
+    env["PYTHONPATH"] = os.pathsep.join(p for p in pythonpath_entries if p)
 
     try:
         proc = subprocess.run(

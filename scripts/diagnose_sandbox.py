@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +32,7 @@ from src.sandbox import (
     ensure_repo_cloned,
     remove_worktree,
     run_test_subset_detailed,
+    split_test_command,
 )
 
 
@@ -63,14 +63,18 @@ def main() -> None:
         print(f"test_patch applied: {test_patch_applied}")
 
         specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
-        test_command = shlex.split(specs["test_cmd"]) + get_test_directives(instance)
+        test_tokens, cmd_env_overrides = split_test_command(specs["test_cmd"])
+        test_command = test_tokens + get_test_directives(instance)
         print(f"test_command: {test_command}")
+        if cmd_env_overrides:
+            print(f"test_command env overrides: {cmd_env_overrides}")
 
         # ensure_repo_cloned() already ran the isolated (non-shared-env) dependency install;
         # mirror sandbox.py's PYTHONPATH construction so this raw run matches the real path.
         deps_dir = _INSTALLED_REPO_VERSIONS.get((instance["repo"], str(instance.get("version", ""))))
         pythonpath_entries = [str(wt)] + ([str(deps_dir)] if deps_dir else []) + [os.environ.get("PYTHONPATH", "")]
-        env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in pythonpath_entries if p)}
+        env = {**os.environ, **cmd_env_overrides}
+        env["PYTHONPATH"] = os.pathsep.join(p for p in pythonpath_entries if p)
         proc = subprocess.run(
             test_command, cwd=str(wt), capture_output=True, text=True, timeout=cfg.sandbox.test_timeout_seconds, env=env
         )
