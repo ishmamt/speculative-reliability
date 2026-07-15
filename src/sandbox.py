@@ -9,6 +9,7 @@ new Docker container per candidate (spec Section 7, point 1).
 """
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -159,6 +160,12 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
     specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
     test_command = shlex.split(specs["test_cmd"]) + get_test_directives(instance)
 
+    # Put the checked-out worktree on PYTHONPATH so `import <package>` resolves to the local,
+    # patched checkout rather than failing outright or silently picking up an unrelated globally
+    # installed version — otherwise a repo-relative runner script (e.g. Django's
+    # ./tests/runtests.py) puts its own directory on sys.path[0], not the repo root.
+    env = {**os.environ, "PYTHONPATH": str(worktree_path) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+
     try:
         proc = subprocess.run(
             test_command,
@@ -166,6 +173,7 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return "fail", "test run timed out"
