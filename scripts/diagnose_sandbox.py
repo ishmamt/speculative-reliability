@@ -18,7 +18,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
+from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.python import get_test_directives
+from swebench.harness.test_spec.test_spec import make_test_spec
 
 from src.config import load_config
 from src.dataset import load_instances_from_manifest
@@ -71,6 +73,15 @@ def main() -> None:
         print(proc.stdout[-6000:])
         print("--- STDERR (last 3000 chars) ---")
         print(proc.stderr[-3000:])
+
+        parser_fn = MAP_REPO_TO_PARSER[instance["repo"]]
+        statuses = parser_fn(proc.stdout + proc.stderr, make_test_spec(instance))
+        print(f"\n--- parser found {len(statuses)} test statuses ---")
+        for key, value in sorted(statuses.items()):
+            print(f"  {key!r}: {value}")
+        print("\n--- FAIL_TO_PASS names we look up (must match a key above exactly) ---")
+        for name in instance["FAIL_TO_PASS"]:
+            print(f"  {name!r} -> {statuses.get(name, 'NOT FOUND')}")
     finally:
         remove_worktree(repo_path, wt)
 
