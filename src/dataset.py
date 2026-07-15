@@ -19,10 +19,25 @@ SWEBENCH_LITE_HF_NAME = "princeton-nlp/SWE-bench_Lite"
 SWEBENCH_LITE_SPLIT = "test"
 
 
+_JSON_ENCODED_LIST_FIELDS = ("FAIL_TO_PASS", "PASS_TO_PASS")
+
+
+def _normalize_instance(instance: dict[str, Any]) -> dict[str, Any]:
+    """The raw HF dataset stores FAIL_TO_PASS/PASS_TO_PASS as JSON-encoded strings (e.g.
+    '["test_a", "test_b"]'), not native lists — `list(a_json_string)` silently degenerates
+    into a list of individual characters instead of raising, so this must be normalized
+    once at load time rather than trusted as already-a-list by every consumer.
+    """
+    for field in _JSON_ENCODED_LIST_FIELDS:
+        if isinstance(instance.get(field), str):
+            instance[field] = json.loads(instance[field])
+    return instance
+
+
 def load_swebench_lite() -> list[dict[str, Any]]:
     """Load the full SWE-bench Lite test split as a list of instance dicts."""
     ds = load_dataset(SWEBENCH_LITE_HF_NAME, split=SWEBENCH_LITE_SPLIT)
-    return list(ds)
+    return [_normalize_instance(dict(inst)) for inst in ds]
 
 
 def select_subset(instances: list[dict[str, Any]], cfg: DatasetConfig) -> list[dict[str, Any]]:

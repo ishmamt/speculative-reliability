@@ -19,6 +19,7 @@ from typing import Literal
 from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.python import get_test_directives
+from swebench.harness.test_spec.test_spec import make_test_spec
 from swebench.harness.utils import get_modified_files
 
 from src.config import SandboxConfig
@@ -175,7 +176,10 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
         return "fail", f"test command could not be run: {exc}"
 
     parser = MAP_REPO_TO_PARSER[instance["repo"]]
-    statuses = parser(proc.stdout + proc.stderr)
+    # This swebench version's parser functions all take (log, test_spec) even though the
+    # test_spec argument goes unused in their bodies (confirmed for parse_log_django) — it's
+    # a signature-compatibility requirement, not a semantic dependency on TestSpec's contents.
+    statuses = parser(proc.stdout + proc.stderr, make_test_spec(instance))
 
     for test_name in test_names:
         if statuses.get(test_name) != "PASSED":
