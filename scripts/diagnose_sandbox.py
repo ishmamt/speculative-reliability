@@ -26,6 +26,7 @@ from src.config import load_config
 from src.dataset import load_instances_from_manifest
 from src.sandbox import (
     _apply_test_patch,
+    _INSTALLED_REPO_VERSIONS,
     _normalize_parser_keys,
     apply_patch,
     create_worktree,
@@ -65,7 +66,11 @@ def main() -> None:
         test_command = shlex.split(specs["test_cmd"]) + get_test_directives(instance)
         print(f"test_command: {test_command}")
 
-        env = {**os.environ, "PYTHONPATH": str(wt) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        # ensure_repo_cloned() already ran the isolated (non-shared-env) dependency install;
+        # mirror sandbox.py's PYTHONPATH construction so this raw run matches the real path.
+        deps_dir = _INSTALLED_REPO_VERSIONS.get((instance["repo"], str(instance.get("version", ""))))
+        pythonpath_entries = [str(wt)] + ([str(deps_dir)] if deps_dir else []) + [os.environ.get("PYTHONPATH", "")]
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in pythonpath_entries if p)}
         proc = subprocess.run(
             test_command, cwd=str(wt), capture_output=True, text=True, timeout=cfg.sandbox.test_timeout_seconds, env=env
         )

@@ -30,7 +30,7 @@ from src.dataset import load_swebench_lite
 SandboxResult = Literal["pass", "fail", "not_applicable"]
 
 _INSTANCE_CACHE: dict[str, dict] | None = None
-_INSTALLED_REPO_VERSIONS: set[tuple[str, str]] = set()
+_INSTALLED_REPO_VERSIONS: dict[tuple[str, str], Path] = {}
 
 
 def _get_instance(instance_id: str) -> dict:
@@ -63,31 +63,45 @@ def ensure_repo_cloned(instance: dict, worktree_base_dir: str) -> Path:
 
     version_key = (repo, str(instance.get("version", "")))
     if version_key not in _INSTALLED_REPO_VERSIONS:
-        _install_repo_dependencies(instance, repo_path, worktree_base_dir)
-        _INSTALLED_REPO_VERSIONS.add(version_key)
+        _INSTALLED_REPO_VERSIONS[version_key] = _install_repo_dependencies(instance, repo_path, worktree_base_dir)
 
     return repo_path
 
 
-def _install_repo_dependencies(instance: dict, repo_path: Path, worktree_base_dir: str) -> None:
+def _deps_dir_for(worktree_base_dir: str, repo: str, version: str) -> Path:
+    """Isolated install target for one (repo, version)'s dependencies, kept out of the
+    shared environment's site-packages — see `_install_repo_dependencies`."""
+    return Path(worktree_base_dir) / "_deps" / f"{repo.replace('/', '__')}__{version or 'unversioned'}"
+
+
+def _install_repo_dependencies(instance: dict, repo_path: Path, worktree_base_dir: str) -> Path:
     """Best-effort, once-per-(repo, version) install of the repo's own runtime dependencies
-    (e.g. Django needs `asgiref`, `sqlparse` just to be importable) into the shared Python
-    environment, at this instance's own base_commit so version-appropriate deps get pulled.
+    (e.g. Django needs `asgiref`, `sqlparse` just to be importable), at this instance's own
+    base_commit so version-appropriate deps get pulled. Returns the isolated directory they
+    were installed into.
+
+    Critical: this must NOT install into the shared environment's site-packages. A repo under
+    test can share its package name with a real dependency of this project's own tooling —
+    `sympy` is both a SWE-bench Lite repo *and* a dependency `torch` needs for symbolic shape
+    tracing, and `requests` is both a repo *and* a dependency of `huggingface_hub`/`datasets`.
+    A global `pip install` of the repo's own (old, base_commit-era) code would silently
+    replace the working version our own scripts need, breaking every future script run in
+    this environment — not just sandbox verification for that repo. Installing into an
+    isolated `--target` directory and adding *only that directory* to the test subprocess's
+    own PYTHONPATH (see `run_test_subset_detailed`) avoids this entirely.
 
     This does NOT attempt to reproduce SWE-bench's exact per-instance pinned environment —
     that needs per-instance conda envs, which this git-worktree-based design intentionally
     skips (spec Section 7). It's a best-effort approximation using the repo's own setup
-    metadata. A plain (non-editable) install is used deliberately: the throwaway worktree
-    this installs from is removed immediately after, and `run_test_subset_detailed` already
-    puts each test run's own worktree on PYTHONPATH ahead of site-packages — so the only
-    thing this install needs to durably provide is third-party dependencies, not the
-    package's own code. Failures are logged, not raised: some repos (e.g. matplotlib's C
-    extensions) may still not fully install this way, and that's a known limitation.
+    metadata. Failures are logged, not raised: some repos (e.g. matplotlib's C extensions)
+    may still not fully install this way, and that's a known limitation.
     """
+    deps_dir = _deps_dir_for(worktree_base_dir, instance["repo"], str(instance.get("version", "")))
+    deps_dir.mkdir(parents=True, exist_ok=True)
     install_worktree = create_worktree(repo_path, instance["base_commit"], worktree_base_dir)
     try:
         result = subprocess.run(
-            ["pip", "install", str(install_worktree)],
+            ["pip", "install", "--target", str(deps_dir), str(install_worktree)],
             capture_output=True,
             text=True,
             timeout=600,
@@ -102,6 +116,7 @@ def _install_repo_dependencies(instance: dict, repo_path: Path, worktree_base_di
         print(f"warning: dependency install for {instance['repo']}@{instance.get('version')} timed out")
     finally:
         remove_worktree(repo_path, install_worktree)
+    return deps_dir
 
 
 def create_worktree(repo_path: Path, commit_ish: str, worktree_base_dir: str) -> Path:
@@ -267,8 +282,16 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
     # Put the checked-out worktree on PYTHONPATH so `import <package>` resolves to the local,
     # patched checkout rather than failing outright or silently picking up an unrelated globally
     # installed version — otherwise a repo-relative runner script (e.g. Django's
-    # ./tests/runtests.py) puts its own directory on sys.path[0], not the repo root.
-    env = {**os.environ, "PYTHONPATH": str(worktree_path) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    # ./tests/runtests.py) puts its own directory on sys.path[0], not the repo root. The
+    # isolated deps dir from _install_repo_dependencies goes on PYTHONPATH too — but only for
+    # this subprocess's own env, never the shared environment (see that function's docstring).
+    version_key = (instance["repo"], str(instance.get("version", "")))
+    deps_dir = _INSTALLED_REPO_VERSIONS.get(version_key)
+    pythonpath_entries = [str(worktree_path)]
+    if deps_dir is not None:
+        pythonpath_entries.append(str(deps_dir))
+    pythonpath_entries.append(os.environ.get("PYTHONPATH", ""))
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in pythonpath_entries if p)}
 
     try:
         proc = subprocess.run(
