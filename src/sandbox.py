@@ -194,6 +194,40 @@ def _normalize_parser_keys(statuses: dict[str, str]) -> dict[str, str]:
     return normalized
 
 
+_TEST_ID_ONLY_RE = re.compile(r"^(?P<method>\S+) \((?P<path>[\w.]+)\)$")
+_PASS_SUFFIXES = ("... ok", "... OK", "...  OK")
+
+
+def _scan_docstring_test_ids(log: str) -> dict[str, str]:
+    """Companion scan for a gap in this swebench version's Django parser: when a test has a
+    docstring, Python's unittest prints the test ID alone on one line, then the docstring
+    text + ' ... ok' on the *next* line — and the parser only registers status under that
+    docstring text, never correlated back to the canonical 'method (Class)' name printed on
+    the preceding line. This reads the same raw log and fills in that correlation.
+
+    Conservative by construction: only a passing result is ever recorded here (a lookup miss
+    still correctly defaults to "not passed" elsewhere, so this can't manufacture a false pass
+    for a genuine failure — it can only recover passes the upstream parser already dropped).
+    """
+    results: dict[str, str] = {}
+    pending: str | None = None
+    for raw_line in log.split("\n"):
+        line = raw_line.strip()
+        if pending is None:
+            match = _TEST_ID_ONLY_RE.match(line)
+            if match and " ... " not in line:
+                method, path = match.group("method"), match.group("path")
+                suffix = f".{method}"
+                if path.endswith(suffix):
+                    path = path[: -len(suffix)]
+                pending = f"{method} ({path})"
+            continue
+        if line.endswith(_PASS_SUFFIXES):
+            results[pending] = "PASSED"
+        pending = None
+    return results
+
+
 def _summarize_test_statuses(instance: dict, statuses: dict[str, str]) -> str:
     """Short human-readable summary of which FAIL_TO_PASS/PASS_TO_PASS tests are still
     failing or regressed, for feeding back to the Actor as an observation (not logged —
@@ -253,11 +287,15 @@ def run_test_subset_detailed(worktree_path: Path, instance: dict, timeout_second
         # test failure, but still something the instance can't be verified against.
         return "fail", f"test command could not be run: {exc}"
 
+    raw_log = proc.stdout + proc.stderr
     parser = MAP_REPO_TO_PARSER[instance["repo"]]
     # This swebench version's parser functions all take (log, test_spec) even though the
     # test_spec argument goes unused in their bodies (confirmed for parse_log_django) — it's
     # a signature-compatibility requirement, not a semantic dependency on TestSpec's contents.
-    statuses = _normalize_parser_keys(parser(proc.stdout + proc.stderr, make_test_spec(instance)))
+    statuses = _normalize_parser_keys(parser(raw_log, make_test_spec(instance)))
+    # Fill in passes the parser drops for docstring-bearing tests (see _scan_docstring_test_ids);
+    # disjoint key space from the parser's own output, so a plain merge is safe.
+    statuses = {**_scan_docstring_test_ids(raw_log), **statuses}
 
     for test_name in test_names:
         if statuses.get(test_name) != "PASSED":
